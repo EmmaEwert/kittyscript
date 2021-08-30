@@ -1,0 +1,3 @@
+# Kitty Script
+
+Simple syntax.
