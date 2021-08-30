@@ -8,7 +8,6 @@ use inkwell::module::Module;
 use inkwell::passes::PassManager;
 use inkwell::targets::TargetTriple;
 use inkwell::types::BasicTypeEnum;
-use inkwell::values::BasicValueEnum;
 use inkwell::values::FunctionValue;
 use inkwell::values::PointerValue;
 use crate::ast::*;
@@ -27,46 +26,32 @@ struct Compiler<'a, 'context> {
 impl<'a, 'context> Compiler<'a, 'context> {
 	fn compile(&mut self) -> Result<(), String> {
 		self.compile_intrinsics();
-
 		let i32_type = self.context.i32_type();
 		let fn_type = i32_type.fn_type(&[], false);
 		let fn_value = self.module.add_function("main", fn_type, None);
 		let main_block = self.context.append_basic_block(fn_value, "main");
 		self.builder.position_at_end(main_block);
-
 		for expression in self.ast {
 			match self.compile_expression(expression) {
 				Err(message) => return Err(message),
 				Ok(_) => { }
 			}
 		}
-
 		let zero = i32_type.const_int(0, false);
 		self.builder.build_return(Some(&zero));
-
 		self.pass_manager.run_on(&fn_value);
-
 		Ok(())
 	}
 
 	fn compile_expression(&mut self, expression : &Expression) -> Result<PointerValue<'context>, String> {
 		match &expression.node {
-			Node::Call(name, expressions) => {
-				let mut arguments = vec![];
-				for expression in expressions {
-					match self.compile_expression(expression) {
-						Ok(value) => arguments.push(value),
-						error => return error,
-					}
-				}
-				self.compile_call(name.to_string(), arguments)
-			}
+			Node::Call(name, expressions)      => self.compile_call(name.to_string(), expressions.to_vec()),
 			Node::Assignment(name, expression) => self.compile_assignment(name.to_string(), expression),
-			Node::Integer(value) => self.compile_integer(*value),
-			Node::Identifier(name) => self.compile_load(name.to_string()),
-			Node::String(string) => self.compile_string(string.replace(r"\n", "\n")),
-			Node::Function(_, _) => Err(format!("unassigned function: {:?}", expression.node)),
-			_ => Err(format!("not yet implemented: {:?}", expression.node))
+			Node::Integer(value)               => self.compile_integer(*value),
+			Node::Identifier(name)             => self.compile_identifier(name.to_string()),
+			Node::String(string)               => self.compile_string(string.replace(r"\n", "\n")),
+			Node::Function(_, _)               => Err(format!("unassigned function: {:?}", expression.node)),
+			_                                  => Err(format!("not yet implemented: {:?}", expression.node))
 		}
 	}
 
@@ -79,7 +64,9 @@ impl<'a, 'context> Compiler<'a, 'context> {
 						let alloca = if self.variables.contains_key(&name) {
 							self.variables[&name]
 						} else {
-							self.builder.build_alloca(self.context.i32_type().ptr_type(AddressSpace::Generic), &name)
+							let i32_type = self.context.i32_type();
+							let i32_ptr_type = i32_type.ptr_type(AddressSpace::Generic);
+							self.builder.build_alloca(i32_ptr_type, &name)
 						};
 						self.builder.build_store(alloca, value);
 						self.variables.insert(name, alloca);
@@ -91,49 +78,26 @@ impl<'a, 'context> Compiler<'a, 'context> {
 		}
 	}
 
-	fn compile_call(&mut self, name : String, arguments: Vec<PointerValue<'context>>) -> Result<PointerValue<'context>, String> {
-		if !self.functions.contains_key(&name) && !self.variables.contains_key(&name){
-			return Err(format!("no defined function {}", name))
-		} 
-		let callable_value = if self.functions.contains_key(&name) {
-			let fn_value = self.functions[&name];
-			let params = fn_value.get_params();
-			if arguments.len() != params.len() && name != "printf" {
-				return Err(format!("incorrect arguments to call {}: got {}, expected {}", name, arguments.len(), params.len()))
-			}
-			CallableValue::from(self.functions[&name])
-		} else {
-			match CallableValue::try_from(self.variables[&name]) {
-				Ok(value) => value,
-				Err(_) => return Err(format!("no defined function pointer {}", name)),
-			}
+	fn compile_call(&mut self, name : String, expressions: Vec<Expression>) -> Result<PointerValue<'context>, String> {
+		let callable_value = match self.functions.get(&name) {
+			Some(fn_value) => CallableValue::from(*fn_value),
+			None => CallableValue::try_from(*self.variables.get(&name).unwrap()).unwrap()
 		};
-		if name == "printf" {
-			let mut printf_arguments = vec![];
-			for (index, argument) in arguments.into_iter().enumerate() {
-				if index == 0 {
-					printf_arguments.push(BasicValueEnum::PointerValue(argument))
-				} else {
-					let load = self.builder.build_load(argument, "arg");
-					let load = self.builder.build_load(load.into_pointer_value(), "arg");
-					printf_arguments.push(load)
-				}
-			}
-			let call = self.builder.build_call(callable_value, &printf_arguments, &name).try_as_basic_value().left().unwrap();
-			let alloca = self.builder.build_alloca(self.context.i32_type(), &name);
-			self.builder.build_store(alloca, call);
-			Ok(alloca)
-		} else {
-			let mut fn_arguments = vec![];
-			for argument in arguments {
-				let load = self.builder.build_load(argument, "arg");
-				fn_arguments.push(load)
-			}
-			let res = self.builder.build_call(callable_value, &fn_arguments, &name).try_as_basic_value().left().unwrap().into_int_value();
-			let alloca = self.builder.build_alloca(self.context.i32_type(), &name);
-			self.builder.build_store(alloca, res);
-			Ok(alloca)
-		}
+		let arguments = expressions
+			.iter()
+			.filter_map(|expression| self.compile_expression(&expression).ok())
+			.collect::<Vec<_>>()
+			.iter()
+			.map(|argument| self.builder.build_load(*argument, "arg"))
+			.collect::<Vec<_>>();
+		let call = self.builder.build_call(callable_value, &arguments, &name)
+			.try_as_basic_value()
+			.left()
+			.unwrap()
+			.into_int_value();
+		let alloca = self.builder.build_alloca(self.context.i32_type(), &name);
+		self.builder.build_store(alloca, call);
+		Ok(alloca)
 	}
 
 	fn compile_function(&mut self, name: String, arguments: Vec<Expression>, expressions: Vec<Expression>) -> Result<PointerValue<'context>, String> {
@@ -179,7 +143,7 @@ impl<'a, 'context> Compiler<'a, 'context> {
 		Ok(alloca)
 	}
 
-	fn compile_load(&mut self, name: String) -> Result<PointerValue<'context>, String> {
+	fn compile_identifier(&mut self, name: String) -> Result<PointerValue<'context>, String> {
 		match self.variables.get(&name) {
 			None => Err(format!("no variable {}", name)),
 			Some(pointer) => Ok(*pointer)
@@ -192,15 +156,28 @@ impl<'a, 'context> Compiler<'a, 'context> {
 
 	fn compile_intrinsics(&mut self) {
 		let i8_type = self.context.i8_type();
+		let i8_ptr_type = i8_type.ptr_type(AddressSpace::Generic);
 		let i32_type = self.context.i32_type();
+		let i32_ptr_type = i32_type.ptr_type(AddressSpace::Generic);
 
 		// extern printf
-		let printf_type = i32_type.fn_type(&[i8_type.ptr_type(AddressSpace::Generic).into()], true);
+		let printf_type = i32_type.fn_type(&[i8_ptr_type.into()], true);
 		let printf_value = self.module.add_function("printf", printf_type, None);
-		self.functions.insert("printf".to_string(), printf_value);
+		// self.functions.insert("printf".to_string(), printf_value);
+
+		let print_type = i32_type.fn_type(&[i32_ptr_type.into()], false);
+		let print_value = self.module.add_function("print", print_type, None);
+		self.functions.insert("print".to_string(), print_value);
+		let print_block = self.context.append_basic_block(print_value, "print");
+		self.builder.position_at_end(print_block);
+		let arg = print_value.get_first_param().unwrap();
+		let string = self.builder.build_global_string_ptr("%d\n", "str").as_pointer_value();
+		let load = self.builder.build_load(arg.into_pointer_value(), "load");
+		let call = self.builder.build_call(printf_value, &[string.into(), load], "printf");
+		self.builder.build_return(Some(&call.try_as_basic_value().left().unwrap()));
 
 		// +
-		let add_type = i32_type.fn_type(&[BasicTypeEnum::PointerType(i32_type.ptr_type(AddressSpace::Generic)), BasicTypeEnum::PointerType(i32_type.ptr_type(AddressSpace::Generic))], false);
+		let add_type = i32_type.fn_type(&[i32_ptr_type.into(), i32_ptr_type.into()], false);
 		let add_value = self.module.add_function("+", add_type, None);
 		self.functions.insert("+".to_string(), add_value);
 		let add_basic_block = self.context.append_basic_block(add_value, "+");
@@ -210,13 +187,11 @@ impl<'a, 'context> Compiler<'a, 'context> {
 		let a = self.builder.build_load(arg0, "a");
 		let b = self.builder.build_load(arg1, "b");
 		let add = self.builder.build_int_add(a.into_int_value(), b.into_int_value(), "add");
-		//let ret = self.builder.build_alloca(i32_type, "ret");
-		//self.builder.build_store(ret, add);
 		self.builder.build_return(Some(&add));
 	}
 }
 
-pub fn compile(ast : Vec<Expression>) -> Result<std::string::String, String> {
+pub fn compile(ast : Vec<Expression>) -> Result<String, String> {
 	let context = Context::create();
 	let module = context.create_module("module");
 	let builder = context.create_builder();
@@ -226,7 +201,6 @@ pub fn compile(ast : Vec<Expression>) -> Result<std::string::String, String> {
 
 	//pass_manager.add_promote_memory_to_register_pass();
 	pass_manager.initialize();
-
 
 	let mut compiler = Compiler {
 		context: &context,

@@ -1,6 +1,5 @@
 x = 69;
 y = 351;
 z = x + y;
-"x = %d\n" printf x;
-"x = %d\n" printf y;
-"z = %d\n" printf z
+print(x);
+print(z)

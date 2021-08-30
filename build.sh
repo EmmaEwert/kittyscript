@@ -1,4 +1,3 @@
 cat main.kitty | cargo run &&\
-clang main.ll &&\
-./a.out &&\
-echo
+clang main.ll -o main &&\
+./main
