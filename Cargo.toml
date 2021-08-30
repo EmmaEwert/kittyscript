@@ -1,0 +1,8 @@
+[package]
+name = "kittyscript"
+version = "0.1.0"
+authors = [ "Emma Ewert <emma.o.ewert@gmail.com>" ]
+
+[dependencies]
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm10-0"] }
+plex = { git = "https://github.com/goffrie/plex" }

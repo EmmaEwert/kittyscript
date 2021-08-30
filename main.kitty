@@ -1,0 +1,9 @@
+add = (a, b) {
+	a + b
+};
+x = 420;
+y = 5;
+z = x + y;
+"z = %d\n" printf z;
+x = x add x add x;
+"x = %d\n" printf x
